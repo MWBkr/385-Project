@@ -1,0 +1,358 @@
+---
+title: "Data Transformations in R"
+author: "Matthew Baker"
+date: today
+format: pdf
+editor: source
+---
+
+```{r}
+#| label: r setup
+#| include: false
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, results = "hold")
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(reticulate)
+library(rvest)
+library(xml2)
+library(stringr)
+
+```
+
+```{r}
+Stock_Info <- read_csv("https://github.com/MWBkr/385-Project/releases/download/Data/Stock_Info.csv")
+
+```
+
+```{r}
+Company_Info <- read_csv("https://raw.githubusercontent.com/MWBkr/385-Project/refs/heads/main/Company_Info.csv")
+```
+
+
+```{r}
+# Join stock and company data
+# Stock_Info uses 'Ticker' column, Company_Info uses 'ticker'
+combined_data <- Stock_Info %>%
+    left_join(Company_Info, by = c("Ticker" = "ticker"), relationship = "many-to-many")
+
+# Check what columns we have
+cat("Combined data columns:", paste(names(combined_data), collapse = ", "), "\n")
+
+# Calculate stock growth metrics
+stock_growth <- combined_data %>%
+    group_by(Ticker) %>%
+    arrange(Date) %>%
+    mutate(
+        price_change = Close - lag(Close),
+        pct_change = (Close - lag(Close)) / lag(Close) * 100,
+        cumulative_return = (Close / first(Close) - 1) * 100
+    ) %>%
+    ungroup()
+```
+
+```{r}
+# Step 1: Create monthly aggregates
+cat("Original data size:", nrow(stock_growth), "rows\n")
+
+stock_growth_monthly <- stock_growth %>%
+    mutate(year_month = floor_date(Date, "month")) %>%
+    group_by(Ticker, year_month) %>%
+    arrange(Date) %>%
+    slice_tail(n = 1) %>%
+    ungroup() %>%
+    select(-Date) %>%
+    rename(Date = year_month)
+
+cat("Monthly aggregated size:", nrow(stock_growth_monthly), "rows\n")
+```
+
+```{r}
+# Step 2: Calculate market capitalization and monthly rankings
+monthly_rankings <- stock_growth_monthly %>%
+    filter(!is.na(Close) & !is.na(Volume)) %>%
+    mutate(market_proxy = Close * Volume) %>%
+    group_by(Date) %>%
+    mutate(
+        monthly_rank = rank(-market_proxy, ties.method = "first"),
+        in_top10 = monthly_rank <= 10,
+        in_top5 = monthly_rank <= 5,
+        in_top3 = monthly_rank <= 3
+    ) %>%
+    ungroup()
+
+cat("Rankings calculated!\n")
+```
+
+```{r}
+# Step 3: Identify milestone events
+milestone_events <- monthly_rankings %>%
+    group_by(Ticker) %>%
+    arrange(Date) %>%
+    mutate(
+        entered_top10 = in_top10 & !lag(in_top10, default = FALSE),
+        entered_top5 = in_top5 & !lag(in_top5, default = FALSE),
+        entered_top3 = in_top3 & !lag(in_top3, default = FALSE),
+        year = lubridate::year(Date)
+    ) %>%
+    filter(entered_top10 | entered_top5 | entered_top3) %>%
+    ungroup()
+
+cat("Milestone events found:", nrow(milestone_events), "\n")
+```
+
+```{r}
+# Step 3.5: Create 80/20 train-test split (time-based)
+# Set seed for reproducibility
+set.seed(123)
+
+# Get unique dates and sort them
+all_dates <- sort(unique(monthly_rankings$Date))
+n_dates <- length(all_dates)
+
+# Calculate 80% cutoff point
+train_cutoff_index <- floor(n_dates * 0.8)
+train_cutoff_date <- all_dates[train_cutoff_index]
+
+# Split monthly_rankings
+monthly_rankings_train <- monthly_rankings %>%
+    filter(Date <= train_cutoff_date)
+
+monthly_rankings_test <- monthly_rankings %>%
+    filter(Date > train_cutoff_date)
+
+# Split milestone_events
+milestone_events_train <- milestone_events %>%
+    filter(Date <= train_cutoff_date)
+
+milestone_events_test <- milestone_events %>%
+    filter(Date > train_cutoff_date)
+
+# Print split summary
+cat("\n=== Train-Test Split Summary ===\n")
+cat(
+    "Training data date range:", as.character(min(monthly_rankings_train$Date)),
+    "to", as.character(max(monthly_rankings_train$Date)), "\n"
+)
+cat(
+    "Training data size:", nrow(monthly_rankings_train), "rows,",
+    nrow(milestone_events_train), "milestone events\n"
+)
+cat(
+    "Test data date range:", as.character(min(monthly_rankings_test$Date)),
+    "to", as.character(max(monthly_rankings_test$Date)), "\n"
+)
+cat(
+    "Test data size:", nrow(monthly_rankings_test), "rows,",
+    nrow(milestone_events_test), "milestone events\n"
+)
+cat("Split ratio: ",
+    round(nrow(monthly_rankings_train) / (nrow(monthly_rankings_train) + nrow(monthly_rankings_test)) * 100, 1),
+    "% train / ",
+    round(nrow(monthly_rankings_test) / (nrow(monthly_rankings_train) + nrow(monthly_rankings_test)) * 100, 1),
+    "% test\n",
+    sep = ""
+)
+```
+
+```{r}
+# Step 4: Define analysis function
+analyze_milestone_impact <- function(full_data, milestone_data, milestone_col, months_before = 3, months_after = 6) {
+    milestone_dates <- milestone_data %>%
+        filter(!!sym(milestone_col)) %>%
+        select(Ticker, milestone_date = Date)
+
+    full_data %>%
+        inner_join(milestone_dates, by = "Ticker", relationship = "many-to-many") %>%
+        mutate(
+            months_from_milestone = interval(milestone_date, Date) %/% months(1)
+        ) %>%
+        filter(months_from_milestone >= -months_before & months_from_milestone <= months_after) %>%
+        group_by(months_from_milestone) %>%
+        summarise(
+            avg_return = mean(pct_change, na.rm = TRUE),
+            median_return = median(pct_change, na.rm = TRUE),
+            count = n(),
+            .groups = "drop"
+        ) %>%
+        mutate(milestone = milestone_col)
+}
+
+cat("Analysis function defined\n")
+```
+
+```{r}
+# Step 5: Calculate impacts for top 10
+cat("Analyzing top 10 milestone impact...\n")
+top10_impact <- analyze_milestone_impact(monthly_rankings, milestone_events, "entered_top10")
+cat("Top 10 analysis complete!\n")
+```
+
+```{r}
+# Step 6: Calculate impacts for top 5
+cat("Analyzing top 5 milestone impact...\n")
+top5_impact <- analyze_milestone_impact(monthly_rankings, milestone_events, "entered_top5")
+cat("Top 5 analysis complete!\n")
+```
+
+```{r}
+# Step 7: Calculate impacts for top 3
+cat("Analyzing top 3 milestone impact...\n")
+top3_impact <- analyze_milestone_impact(monthly_rankings, milestone_events, "entered_top3")
+cat("Top 3 analysis complete!\n")
+```
+
+```{r}
+# Step 8: Combine all impacts
+all_impacts <- bind_rows(top10_impact, top5_impact, top3_impact)
+cat("All impacts combined!\n")
+```
+
+```{r}
+# Step 9: Create milestone summary
+milestone_summary <- milestone_events %>%
+    pivot_longer(
+        cols = c(entered_top10, entered_top5, entered_top3),
+        names_to = "milestone", values_to = "occurred"
+    ) %>%
+    filter(occurred) %>%
+    group_by(milestone, year) %>%
+    summarise(
+        events = n(),
+        avg_return_on_day = mean(pct_change, na.rm = TRUE),
+        median_return_on_day = median(pct_change, na.rm = TRUE),
+        .groups = "drop"
+    )
+
+cat("\n=== Milestone Events Summary ===\n")
+print(milestone_summary, n = 50)
+```
+
+```{r}
+# Step 10: Display overall summary
+cat("\n=== Overall Summary by Milestone Type ===\n")
+milestone_events %>%
+    pivot_longer(
+        cols = c(entered_top10, entered_top5, entered_top3),
+        names_to = "milestone", values_to = "occurred"
+    ) %>%
+    filter(occurred) %>%
+    group_by(milestone) %>%
+    summarise(
+        total_events = n(),
+        avg_return = mean(pct_change, na.rm = TRUE),
+        median_return = median(pct_change, na.rm = TRUE),
+        .groups = "drop"
+    ) %>%
+    print()
+
+cat("\n=== Returns Around Milestones (by month) ===\n")
+print(all_impacts, n = 30)
+```
+
+```{r}
+# Visualize stock performance around milestone events (monthly window)
+ggplot(all_impacts, aes(x = months_from_milestone, y = avg_return, color = milestone)) +
+    geom_line(size = 1) +
+    geom_point() +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "red", alpha = 0.7) +
+    geom_hline(yintercept = 0, linetype = "dotted", color = "gray") +
+    labs(
+        title = "Stock Performance Around S&P 500 Ranking Milestones",
+        subtitle = "Average monthly returns before and after entering top tiers",
+        x = "Months from Milestone Event",
+        y = "Average Monthly Return (%)",
+        color = "Milestone"
+    ) +
+    scale_color_manual(
+        values = c("entered_top10" = "#2E86AB", "entered_top5" = "#A23B72", "entered_top3" = "#F18F01"),
+        labels = c("Entered Top 10", "Entered Top 5", "Entered Top 3")
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+```
+
+```{r}
+# Visualize milestone events by year
+milestone_events %>%
+    pivot_longer(
+        cols = c(entered_top10, entered_top5, entered_top3),
+        names_to = "milestone", values_to = "occurred"
+    ) %>%
+    filter(occurred) %>%
+    group_by(year, milestone) %>%
+    summarise(events = n(), .groups = "drop") %>%
+    ggplot(aes(x = year, y = events, color = milestone, fill = milestone)) +
+    geom_col(position = "dodge", alpha = 0.7) +
+    labs(
+        title = "Frequency of S&P 500 Ranking Milestones Over Time",
+        x = "Year",
+        y = "Number of Events",
+        color = "Milestone",
+        fill = "Milestone"
+    ) +
+    scale_color_manual(
+        values = c("entered_top10" = "#2E86AB", "entered_top5" = "#A23B72", "entered_top3" = "#F18F01"),
+        labels = c("Entered Top 10", "Entered Top 5", "Entered Top 3")
+    ) +
+    scale_fill_manual(
+        values = c("entered_top10" = "#2E86AB", "entered_top5" = "#A23B72", "entered_top3" = "#F18F01"),
+        labels = c("Entered Top 10", "Entered Top 5", "Entered Top 3")
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+```
+
+```{r}
+# Average returns on milestone entry day by year
+milestone_events %>%
+    pivot_longer(
+        cols = c(entered_top10, entered_top5, entered_top3),
+        names_to = "milestone", values_to = "occurred"
+    ) %>%
+    filter(occurred) %>%
+    group_by(year, milestone) %>%
+    summarise(avg_return = mean(pct_change, na.rm = TRUE), .groups = "drop") %>%
+    ggplot(aes(x = year, y = avg_return, color = milestone)) +
+    geom_line(size = 1) +
+    geom_point() +
+    geom_hline(yintercept = 0, linetype = "dotted", color = "gray") +
+    labs(
+        title = "Average Stock Return on Milestone Entry Day",
+        subtitle = "Performance trends over time",
+        x = "Year",
+        y = "Average Daily Return (%)",
+        color = "Milestone"
+    ) +
+    scale_color_manual(
+        values = c("entered_top10" = "#2E86AB", "entered_top5" = "#A23B72", "entered_top3" = "#F18F01"),
+        labels = c("Entered Top 10", "Entered Top 5", "Entered Top 3")
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
