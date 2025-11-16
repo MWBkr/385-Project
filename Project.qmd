@@ -17,6 +17,7 @@ library(reticulate)
 library(rvest)
 library(xml2)
 library(stringr)
+library(rsample)
 
 ```
 
@@ -29,6 +30,12 @@ Stock_Info <- read_csv("https://github.com/MWBkr/385-Project/releases/download/D
 Company_Info <- read_csv("https://raw.githubusercontent.com/MWBkr/385-Project/refs/heads/main/Company_Info.csv")
 ```
 
+```{r}
+init_split <- time_embargo_split(stocks, date_col = "Date", prop = 0.80, embargo = 5)
+
+train <- training(init_split)
+test  <- testing(init_split)
+```
 
 ```{r}
 # Join stock and company data
