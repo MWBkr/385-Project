@@ -17,24 +17,89 @@ library(reticulate)
 library(rvest)
 library(xml2)
 library(stringr)
-library(rsample)
+library(timetk)
 
 ```
 
 ```{r}
 Stock_Info <- read_csv("https://github.com/MWBkr/385-Project/releases/download/Data/Stock_Info.csv")
-
+colnames(Stock_Info)
 ```
 
 ```{r}
 Company_Info <- read_csv("https://raw.githubusercontent.com/MWBkr/385-Project/refs/heads/main/Company_Info.csv")
 ```
+```{r}
+# install.packages("rsample")  # if you don't have it yet
+library(rsample)
+
+# ---- time-based split with H-day trading embargo ----
+time_embargo_split <- function(dataset,
+                               date_col,
+                               prop = 0.80,    # % of unique dates before the test cutoff
+                               embargo = 5L,   # gap (H trading days) before test
+                               ticker_col = NULL) {
+
+  if (!inherits(dataset, c("data.frame","tbl_df","data.table")))
+    stop("Pass a data.frame/tibble/data.table, not: ", paste(class(dataset), collapse=", "))
+
+  d <- as.data.frame(dataset)
+
+  if (!date_col %in% names(d))
+    stop("Column '", date_col, "' not found. Available: ", paste(names(d), collapse=", "))
+
+  # Parse dates (keeps Date as-is; converts POSIXct to Date; tries base then lubridate)
+  dates <- d[[date_col]]
+  if (!inherits(dates, "Date")) {
+    if (inherits(dates, c("POSIXct","POSIXt"))) {
+      dates <- as.Date(dates)
+    } else {
+      dates <- suppressWarnings(as.Date(dates))
+      if (sum(is.na(dates)) > 0.2 * length(dates) && requireNamespace("lubridate", quietly = TRUE)) {
+        dates2 <- suppressWarnings(lubridate::ymd(d[[date_col]], quiet = TRUE))
+        dates  <- ifelse(is.na(dates) & !is.na(dates2), as.Date(dates2), dates)
+      }
+    }
+  }
+  keep <- !is.na(dates)
+  d <- d[keep, , drop = FALSE]
+  dates <- dates[keep]
+
+  # Stable sort by date (and ticker if provided/present)
+  if (!is.null(ticker_col) && ticker_col %in% names(d)) {
+    ord <- order(dates, d[[ticker_col]])
+  } else {
+    ord <- order(dates)
+  }
+  d <- d[ord, , drop = FALSE]
+  dates <- dates[ord]
+
+  # Split by unique trading dates (not rows)
+  ud <- sort(unique(dates))
+  n  <- length(ud)
+  if (n < embargo + 2)
+    stop("Not enough unique dates for embargo=", embargo, " (have ", n, ").")
+
+  cutoff_idx  <- max(2L, min(floor(prop * n), n))
+  cutoff_date <- ud[cutoff_idx]
+
+  embargo_start_idx <- max(1L, cutoff_idx - as.integer(embargo))
+  embargo_start     <- ud[embargo_start_idx]
+
+  idx_train <- which(dates < embargo_start)
+  idx_test  <- which(dates >= cutoff_date)
+
+  rsample::make_splits(list(analysis = idx_train, assessment = idx_test), d)
+}
+```
 
 ```{r}
-init_split <- time_embargo_split(stocks, date_col = "Date", prop = 0.80, embargo = 5)
+init_split <- time_embargo_split(Stock_Info, date_col = "Date", prop = 0.80, embargo = 5)
 
 train <- training(init_split)
 test  <- testing(init_split)
+View(train)
+View(test)
 ```
 
 ```{r}
