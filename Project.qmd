@@ -18,7 +18,10 @@ library(rvest)
 library(xml2)
 library(stringr)
 library(timetk)
-
+library(lubridate)
+library(slider)
+library(forecast)
+library(tseries)
 ```
 
 ```{r}
@@ -27,107 +30,6 @@ Stock_Info <- read_csv("https://github.com/MWBkr/385-Project/releases/download/D
 
 ```{r}
 Company_Info <- read_csv("https://raw.githubusercontent.com/MWBkr/385-Project/refs/heads/main/Company_Info.csv")
-```
-```{r}
-# ---- time-based split with H-day trading embargo ----
-time_embargo_split <- function(dataset,
-                               date_col,
-                               prop = 0.80,    # % of unique dates before the test cutoff
-                               embargo = 5L,   # gap (H trading days) before test
-                               ticker_col = NULL) {
-
-  if (!inherits(dataset, c("data.frame","tbl_df","data.table")))
-    stop("Pass a data.frame/tibble/data.table, not: ", paste(class(dataset), collapse=", "))
-
-  d <- as.data.frame(dataset)
-
-  if (!date_col %in% names(d))
-    stop("Column '", date_col, "' not found. Available: ", paste(names(d), collapse=", "))
-
-  # Parse dates (keeps Date as-is; converts POSIXct to Date; tries base then lubridate)
-  dates <- d[[date_col]]
-  if (!inherits(dates, "Date")) {
-    if (inherits(dates, c("POSIXct","POSIXt"))) {
-      dates <- as.Date(dates)
-    } else {
-      dates <- suppressWarnings(as.Date(dates))
-      if (sum(is.na(dates)) > 0.2 * length(dates) && requireNamespace("lubridate", quietly = TRUE)) {
-        dates2 <- suppressWarnings(lubridate::ymd(d[[date_col]], quiet = TRUE))
-        dates  <- ifelse(is.na(dates) & !is.na(dates2), as.Date(dates2), dates)
-      }
-    }
-  }
-  keep <- !is.na(dates)
-  d <- d[keep, , drop = FALSE]
-  dates <- dates[keep]
-
-  # Stable sort by date (and ticker if provided/present)
-  if (!is.null(ticker_col) && ticker_col %in% names(d)) {
-    ord <- order(dates, d[[ticker_col]])
-  } else {
-    ord <- order(dates)
-  }
-  d <- d[ord, , drop = FALSE]
-  dates <- dates[ord]
-
-  # Split by unique trading dates (not rows)
-  ud <- sort(unique(dates))
-  n  <- length(ud)
-  if (n < embargo + 2)
-    stop("Not enough unique dates for embargo=", embargo, " (have ", n, ").")
-
-  cutoff_idx  <- max(2L, min(floor(prop * n), n))
-  cutoff_date <- ud[cutoff_idx]
-
-  embargo_start_idx <- max(1L, cutoff_idx - as.integer(embargo))
-  embargo_start     <- ud[embargo_start_idx]
-
-  idx_train <- which(dates < embargo_start)
-  idx_test  <- which(dates >= cutoff_date)
-
-  rsample::make_splits(list(analysis = idx_train, assessment = idx_test), d)
-}
-```
-
-```{r}
-#Splits the data based on the date and has a gap of five 
-init_split <- time_embargo_split(Stock_Info, date_col = "Date", prop = 0.80, embargo = 5)
-
-train <- training(init_split)
-test  <- testing(init_split)
-#View(train)
-#View(test)
-```
-
-```{r}
-# Join stock and company data
-# Stock_Info uses 'Ticker' column, Company_Info uses 'ticker'
-combined_data <- Stock_Info %>%
-    # Perform a left join to attach company info to each stock row
-    # 'relationship = "many-to-many"' allows repeated tickers/dates in both tables
-    left_join(Company_Info, by = c("Ticker" = "ticker"), relationship = "many-to-many")
-
-# Check what columns we have
-cat("Combined data columns:", paste(names(combined_data), collapse = ", "), "\n")
-
-# Calculate stock growth metrics
-stock_growth <- combined_data %>%
-    # Group by ticker so calculations happen within each stock
-    group_by(Ticker) %>%
-    # Order rows by date so lag() and first() work properly
-    arrange(Date) %>%
-    mutate(
-        # Daily (or periodic) price change vs. previous value
-        price_change = Close - lag(Close),
-
-        # Percentage change relative to previous closing price
-        pct_change = (Close - lag(Close)) / lag(Close) * 100,
-
-        # Cumulative return from the first available date
-        cumulative_return = (Close / first(Close) - 1) * 100
-    ) %>%
-    # Remove grouping so later operations start clean
-    ungroup()
 ```
 
 ```{r}
@@ -454,28 +356,189 @@ milestone_events %>%
     theme_minimal() +
     theme(legend.position = "bottom")
 ```
+#Exploratory Data Analysis
+```{r}
+#Split the columns into whether they are numeric or categorical
+numeric_columns <- monthly_rankings %>% select(where(is.numeric)) %>% names()
+categorical_columns <- monthly_rankings %>% select(where(~ is.character(.x) || is.factor(.x) || is.logical(.x))) %>% names()
+```
+
+```{r}
+#Create output folder for CSVs/PNGs
+
+outdir <- "eda_outputs"
+if(!dir.exists(outdir)) dir.create(outdir)
+{
+  save_csv <- function(x, name)
+  {
+    readr::write_csv(
+    tibble::as_tibble(x, rownames = NA) %>% tibble::rownames_to_column(".row") %>% relocate(.row),
+    file.path(outdir, name))
+  }
+}
+```
+
+```{r}
+#Checking numeric columns against numeric columns
+if (length(numeric_columns) >= 2)
+{
+  num_mat <- monthly_rankings %>% select(all_of(numeric_columns))
+  corr_p <- cor(num_mat, use = "pairwise.complete.obs", method = "pearson")
+  corr_s <- cor(num_mat, use = "pairwise.complete.obs", method = "spearman")
+  
+  plot_corr <- function(cm, title_text)
+  {
+    cm_long <- as.data.frame(as.table(cm)) %>%
+      rename(var1 = Var1, var2 = Var2, value = Freq)
+
+    ggplot2::ggplot(cm_long, ggplot2::aes(var1, var2, fill = value)) +
+      ggplot2::geom_tile() +
+      ggplot2::scale_fill_gradient2(limits = c(-1, 1), midpoint = 0, name = NULL) +
+      ggplot2::coord_equal() +
+      ggplot2::labs(title = title_text, x = NULL, y = NULL) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1),
+                     plot.title = ggplot2::element_text(face = "bold"))
+
+  }
+
+  p1 <- plot_corr(corr_p, "Pearson correlation (numeric)")
+  p2 <- plot_corr(corr_s, "Spearman correlation (numeric)")
+
+  p1; p2
+
+  ggplot2::ggsave(file.path(outdir, "corr_numeric_pearson.png"), p1, width = 8, height = 6, dpi = 150)
+  ggplot2::ggsave(file.path(outdir, "corr_numeric_spearman.png"), p2, width = 8, height = 6, dpi = 150)
+}
+```
+
+```{r}
+#Checking categorical columns against categorical columns
+
+cramers_v <- function(x, y)
+{
+  tbl <- table(x, y)
+  if(nrow(tbl) < 2 || ncol(tbl) < 2)
+  {
+    return(NA_real_)
+  }
+  suppressWarnings(
+  {
+    chi <- suppressWarnings(chisq.test(tbl, correct = FALSE)$statistic)
+    n <- sum(tbl)
+    r <- nrow(tbl); k <- ncol(tbl)
+    v <- sqrt(as.numeric(chi) / n / min(r - 1, k - 1))
+    v
+  })
+}
+
+#Limits high-cardinality columns for tractability
+
+max_levels <- 40L
+categorical_usable <- categorical_columns[vapply(monthly_rankings[categorical_columns], function(v) n_distinct(v, na.rm = F) <= max_levels, logical(1))]
+
+if(length(categorical_usable) >= 2)
+{
+  cv_mat <- matrix(NA_real_, nrow = length(categorical_usable), ncol = length(categorical_usable), dimnames = list(categorical_usable, categorical_usable))
+  for(i in seq_along(categorical_usable))
+  {
+    for(j in i:length(categorical_usable))
+    {
+      v <- cramers_v(monthly_rankings[[categorical_usable[i]]], monthly_rankings[[categorical_usable[j]]])
+      cv_mat[i, j] <- cv_mat[j,i] <- v
+    }
+  }
 
 
+  save_csv(cv_mat, "cramers_v_categorical.csv")
+
+  cv_long <- as.data.frame(as.table(cv_mat)) %>%
+    rename(var1 = Var1, var2 = Var2, value = Freq)
+
+  p_cv <- ggplot2::ggplot(cv_long, ggplot2::aes(var1, var2, fill = value)) +
+  ggplot2::geom_tile() +
+  ggplot2::scale_fill_gradient(low = "#f0f0f0", high = "#1f77b4", na.value = "white", name = NULL) +
+  ggplot2::coord_equal() +
+  ggplot2::labs(title = "Cramér’s V (categorical)", x = NULL, y = NULL) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1),
+  plot.title = ggplot2::element_text(face = "bold"))
+  p_cv
+
+  ggplot2::ggsave(file.path(outdir, "cramers_v_categorical.png"), p_cv, width = 8, height = 6, dpi = 150)
+}
+```
+
+```{r}
+#Checking categorical columns versus numerical columns
+
+eta2 <- function(y, x)
+{
+  ok <- stats::complete.cases(y, x)
+  y <- y[ok]; x <- x[ok]
+  if(!length(y))
+  {
+    return(NA_real_)
+  }
+  grand <- mean(y)
+  ss_t <- sum((y - grand)^2)
+  if(ss_t == 0)
+  {
+    return(NA_real_)
+  }
+  g <- tapply(y, x, function(z) c(n = length(z), m = mean(z)))
+  n <- vapply(g, function(u) u[["n"]], numeric(1))
+  m <- vapply(g, function(u) u[["m"]], numeric(1))
+  ss_b <- sum(n * (m - grand)^2)
+  as.numeric(ss_b / ss_t)
+}
+
+numeric_usable <- numeric_columns
+categorical_usable <- categorical_columns[
+  vapply(
+    monthly_rankings[categorical_columns],
+    function(v) n_distinct(v, na.rm = FALSE) <= 60L,
+    logical(1)
+  )
+]
+
+if(length(numeric_usable) >= 1 && length(categorical_usable) >= 1)
+{
+  eta_grid <- purrr::map_dfr(categorical_usable, function(cc)
+    {
+      # Use an explicit function so 'cc' is captured properly
+      vals <- purrr::map_dbl(numeric_usable, function(nc)
+      {
+        eta2(monthly_rankings[[nc]], monthly_rankings[[cc]])
+      })
+      tibble::tibble(
+        categorical = cc,
+        !!! rlang::set_names(as.list(vals), numeric_usable)  # splice named columns
+      )
+    })
+
+  readr::write_csv(eta_grid, file.path(outdir, "eta2_categorical_numeric.csv"))
+
+  eta_long <- eta_grid %>%
+    pivot_longer(-categorical, names_to = "numeric", values_to = "eta2") %>%
+    arrange(desc(eta2)) %>%
+    filter(!is.na(eta2))
+
+  top_pairs <- eta_long %>%
+    slice_head(n = 20)
+
+  readr::write_csv(top_pairs, file.path(outdir, "eta2_top_pairs.csv"))
+
+  top_pairs %>%
+    mutate(eta2 = round(eta2, 3)) %>%
+    knitr::kable(caption = "Top 20 categorical -> numerical associations (η²)")
+}
+```
 
 
+#Sliding Window
+```{r}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+```
 
 
