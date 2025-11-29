@@ -113,7 +113,7 @@ cat("Milestone events found:", nrow(milestone_events), "\n")
 # Set seed for reproducibility
 set.seed(123)
 
-# Calculate 80% cutoff based on DATA VOLUME (rows), not just unique dates
+# Calculate 80% cutoff based on DATA VOLUME
 # This ensures a true 80/20 split of the dataset size
 sorted_dates <- sort(monthly_rankings$Date)
 n_rows <- length(sorted_dates)
@@ -645,7 +645,7 @@ if (length(loop_starts) > 0) {
 
 ```{r}
 #| label: final-evaluation
-# 4.) Keep doing this until we reach the testing set...
+# 4.) Keep doing this until we reach the testing set
 # 5.) Do error metrics one final time
 
 # Now we train on the ENTIRE training set (the "most accurate" model so far)
@@ -713,7 +713,7 @@ if (nrow(all_results) > 0) {
 
 ```{r}
 #| label: future-prediction
-# 6.) Then predict the final trends of the market...
+# 6.) Then predict the final trends of the market
 
 # Train on ALL available data (Train + Test) for the best possible future forecast
 # Convert to time series for ARIMA
@@ -788,8 +788,5 @@ if (nrow(yearly_index_effect) > 2) {
             y = "Average Monthly Return on Entry", x = "Year"
         ) +
         theme_minimal())
-
-    cat("\n=== Index Effect ARIMA Model ===\n")
-    print(effect_model)
 }
 ```
