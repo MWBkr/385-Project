@@ -34,9 +34,9 @@ Company_Info <- read_csv("https://raw.githubusercontent.com/MWBkr/385-Project/re
 
 ```{r}
 # Step 1: Create monthly aggregates
-cat("Original data size:", nrow(stock_growth), "rows\n")
+cat("Original data size:", nrow(Stock_Info), "rows\n")
 
-stock_growth_monthly <- stock_growth %>%
+stock_growth_monthly <- Stock_Info %>%
     # Convert each date to the first day of its month
     mutate(year_month = floor_date(Date, "month")) %>%
     # Group by ticker + month to create monthly summaries
@@ -61,6 +61,11 @@ monthly_rankings <- stock_growth_monthly %>%
     filter(!is.na(Close) & !is.na(Volume)) %>%
     # Rough proxy for market cap = price * volume
     mutate(market_proxy = Close * Volume) %>%
+    # Calculate monthly percentage change
+    group_by(Ticker) %>%
+    arrange(Date) %>%
+    mutate(pct_change = (Close - lag(Close)) / lag(Close)) %>%
+    ungroup() %>%
     # Group by month so rankings are computed within each month
     group_by(Date) %>%
     mutate(
@@ -104,17 +109,16 @@ cat("Milestone events found:", nrow(milestone_events), "\n")
 ```
 
 ```{r}
-# Step 3.5: Create 80/20 train-test split (time-based)
+# Step 3.5: Create train-test split (data volume based)
 # Set seed for reproducibility
 set.seed(123)
 
-# Get unique dates and sort them
-all_dates <- sort(unique(monthly_rankings$Date))
-n_dates <- length(all_dates)
-
-# Calculate 80% cutoff point
-train_cutoff_index <- floor(n_dates * 0.8)
-train_cutoff_date <- all_dates[train_cutoff_index]
+# Calculate 80% cutoff based on DATA VOLUME (rows), not just unique dates
+# This ensures a true 80/20 split of the dataset size
+sorted_dates <- sort(monthly_rankings$Date)
+n_rows <- length(sorted_dates)
+train_cutoff_index <- floor(n_rows * 0.8)
+train_cutoff_date <- sorted_dates[train_cutoff_index]
 
 # Split monthly_rankings into training period and testing period
 monthly_rankings_train <- monthly_rankings %>%
@@ -160,7 +164,6 @@ cat("Split ratio: ",
 ```{r}
 # Step 4: Define analysis function
 analyze_milestone_impact <- function(full_data, milestone_data, milestone_col, months_before = 3, months_after = 6) {
-
     # Pull dates for this milestone type (top10, top5, or top3)
     milestone_dates <- milestone_data %>%
         filter(!!sym(milestone_col)) %>%
@@ -356,189 +359,437 @@ milestone_events %>%
     theme_minimal() +
     theme(legend.position = "bottom")
 ```
+
 #Exploratory Data Analysis
 ```{r}
-#Split the columns into whether they are numeric or categorical
-numeric_columns <- monthly_rankings %>% select(where(is.numeric)) %>% names()
-categorical_columns <- monthly_rankings %>% select(where(~ is.character(.x) || is.factor(.x) || is.logical(.x))) %>% names()
+# Split the columns into whether they are numeric or categorical
+numeric_columns <- monthly_rankings %>%
+    select(where(is.numeric)) %>%
+    names()
+categorical_columns <- monthly_rankings %>%
+    select(where(~ is.character(.x) || is.factor(.x) || is.logical(.x))) %>%
+    names()
 ```
 
 ```{r}
-#Create output folder for CSVs/PNGs
+# Create output folder for CSVs/PNGs
 
 outdir <- "eda_outputs"
-if(!dir.exists(outdir)) dir.create(outdir)
+if (!dir.exists(outdir)) dir.create(outdir)
 {
-  save_csv <- function(x, name)
-  {
-    readr::write_csv(
-    tibble::as_tibble(x, rownames = NA) %>% tibble::rownames_to_column(".row") %>% relocate(.row),
-    file.path(outdir, name))
-  }
+    save_csv <- function(x, name) {
+        readr::write_csv(
+            tibble::as_tibble(x, rownames = NA) %>% tibble::rownames_to_column(".row") %>% relocate(.row),
+            file.path(outdir, name)
+        )
+    }
 }
 ```
 
 ```{r}
-#Checking numeric columns against numeric columns
-if (length(numeric_columns) >= 2)
-{
-  num_mat <- monthly_rankings %>% select(all_of(numeric_columns))
-  corr_p <- cor(num_mat, use = "pairwise.complete.obs", method = "pearson")
-  corr_s <- cor(num_mat, use = "pairwise.complete.obs", method = "spearman")
-  
-  plot_corr <- function(cm, title_text)
-  {
-    cm_long <- as.data.frame(as.table(cm)) %>%
-      rename(var1 = Var1, var2 = Var2, value = Freq)
+# Checking numeric columns against numeric columns
+if (length(numeric_columns) >= 2) {
+    num_mat <- monthly_rankings %>% select(all_of(numeric_columns))
+    corr_p <- cor(num_mat, use = "pairwise.complete.obs", method = "pearson")
+    corr_s <- cor(num_mat, use = "pairwise.complete.obs", method = "spearman")
 
-    ggplot2::ggplot(cm_long, ggplot2::aes(var1, var2, fill = value)) +
-      ggplot2::geom_tile() +
-      ggplot2::scale_fill_gradient2(limits = c(-1, 1), midpoint = 0, name = NULL) +
-      ggplot2::coord_equal() +
-      ggplot2::labs(title = title_text, x = NULL, y = NULL) +
-      ggplot2::theme_minimal() +
-      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1),
-                     plot.title = ggplot2::element_text(face = "bold"))
+    plot_corr <- function(cm, title_text) {
+        cm_long <- as.data.frame(as.table(cm)) %>%
+            rename(var1 = Var1, var2 = Var2, value = Freq)
 
-  }
+        ggplot2::ggplot(cm_long, ggplot2::aes(var1, var2, fill = value)) +
+            ggplot2::geom_tile() +
+            ggplot2::scale_fill_gradient2(limits = c(-1, 1), midpoint = 0, name = NULL) +
+            ggplot2::coord_equal() +
+            ggplot2::labs(title = title_text, x = NULL, y = NULL) +
+            ggplot2::theme_minimal() +
+            ggplot2::theme(
+                axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1),
+                plot.title = ggplot2::element_text(face = "bold")
+            )
+    }
 
-  p1 <- plot_corr(corr_p, "Pearson correlation (numeric)")
-  p2 <- plot_corr(corr_s, "Spearman correlation (numeric)")
+    p1 <- plot_corr(corr_p, "Pearson correlation (numeric)")
+    p2 <- plot_corr(corr_s, "Spearman correlation (numeric)")
 
-  p1; p2
+    p1
+    p2
 
-  ggplot2::ggsave(file.path(outdir, "corr_numeric_pearson.png"), p1, width = 8, height = 6, dpi = 150)
-  ggplot2::ggsave(file.path(outdir, "corr_numeric_spearman.png"), p2, width = 8, height = 6, dpi = 150)
+    ggplot2::ggsave(file.path(outdir, "corr_numeric_pearson.png"), p1, width = 8, height = 6, dpi = 150)
+    ggplot2::ggsave(file.path(outdir, "corr_numeric_spearman.png"), p2, width = 8, height = 6, dpi = 150)
 }
 ```
 
 ```{r}
-#Checking categorical columns against categorical columns
+# Checking categorical columns against categorical columns
 
-cramers_v <- function(x, y)
-{
-  tbl <- table(x, y)
-  if(nrow(tbl) < 2 || ncol(tbl) < 2)
-  {
-    return(NA_real_)
-  }
-  suppressWarnings(
-  {
-    chi <- suppressWarnings(chisq.test(tbl, correct = FALSE)$statistic)
-    n <- sum(tbl)
-    r <- nrow(tbl); k <- ncol(tbl)
-    v <- sqrt(as.numeric(chi) / n / min(r - 1, k - 1))
-    v
-  })
+cramers_v <- function(x, y) {
+    tbl <- table(x, y)
+    if (nrow(tbl) < 2 || ncol(tbl) < 2) {
+        return(NA_real_)
+    }
+    suppressWarnings({
+        chi <- suppressWarnings(chisq.test(tbl, correct = FALSE)$statistic)
+        n <- sum(tbl)
+        r <- nrow(tbl)
+        k <- ncol(tbl)
+        v <- sqrt(as.numeric(chi) / n / min(r - 1, k - 1))
+        v
+    })
 }
 
-#Limits high-cardinality columns for tractability
+# Limits high-cardinality columns for tractability
 
 max_levels <- 40L
 categorical_usable <- categorical_columns[vapply(monthly_rankings[categorical_columns], function(v) n_distinct(v, na.rm = F) <= max_levels, logical(1))]
 
-if(length(categorical_usable) >= 2)
-{
-  cv_mat <- matrix(NA_real_, nrow = length(categorical_usable), ncol = length(categorical_usable), dimnames = list(categorical_usable, categorical_usable))
-  for(i in seq_along(categorical_usable))
-  {
-    for(j in i:length(categorical_usable))
+if (length(categorical_usable) >= 2) {
+    cv_mat <- matrix(NA_real_, nrow = length(categorical_usable), ncol = length(categorical_usable), dimnames = list(categorical_usable, categorical_usable))
+    for (i in seq_along(categorical_usable))
     {
-      v <- cramers_v(monthly_rankings[[categorical_usable[i]]], monthly_rankings[[categorical_usable[j]]])
-      cv_mat[i, j] <- cv_mat[j,i] <- v
+        for (j in i:length(categorical_usable))
+        {
+            v <- cramers_v(monthly_rankings[[categorical_usable[i]]], monthly_rankings[[categorical_usable[j]]])
+            cv_mat[i, j] <- cv_mat[j, i] <- v
+        }
     }
-  }
 
 
-  save_csv(cv_mat, "cramers_v_categorical.csv")
+    save_csv(cv_mat, "cramers_v_categorical.csv")
 
-  cv_long <- as.data.frame(as.table(cv_mat)) %>%
-    rename(var1 = Var1, var2 = Var2, value = Freq)
+    cv_long <- as.data.frame(as.table(cv_mat)) %>%
+        rename(var1 = Var1, var2 = Var2, value = Freq)
 
-  p_cv <- ggplot2::ggplot(cv_long, ggplot2::aes(var1, var2, fill = value)) +
-  ggplot2::geom_tile() +
-  ggplot2::scale_fill_gradient(low = "#f0f0f0", high = "#1f77b4", na.value = "white", name = NULL) +
-  ggplot2::coord_equal() +
-  ggplot2::labs(title = "Cramér’s V (categorical)", x = NULL, y = NULL) +
-  ggplot2::theme_minimal() +
-  ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1),
-  plot.title = ggplot2::element_text(face = "bold"))
-  p_cv
+    p_cv <- ggplot2::ggplot(cv_long, ggplot2::aes(var1, var2, fill = value)) +
+        ggplot2::geom_tile() +
+        ggplot2::scale_fill_gradient(low = "#f0f0f0", high = "#1f77b4", na.value = "white", name = NULL) +
+        ggplot2::coord_equal() +
+        ggplot2::labs(title = "Cramér’s V (categorical)", x = NULL, y = NULL) +
+        ggplot2::theme_minimal() +
+        ggplot2::theme(
+            axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1),
+            plot.title = ggplot2::element_text(face = "bold")
+        )
+    p_cv
 
-  ggplot2::ggsave(file.path(outdir, "cramers_v_categorical.png"), p_cv, width = 8, height = 6, dpi = 150)
+    ggplot2::ggsave(file.path(outdir, "cramers_v_categorical.png"), p_cv, width = 8, height = 6, dpi = 150)
 }
 ```
 
 ```{r}
-#Checking categorical columns versus numerical columns
+# Checking categorical columns versus numerical columns
 
-eta2 <- function(y, x)
-{
-  ok <- stats::complete.cases(y, x)
-  y <- y[ok]; x <- x[ok]
-  if(!length(y))
-  {
-    return(NA_real_)
-  }
-  grand <- mean(y)
-  ss_t <- sum((y - grand)^2)
-  if(ss_t == 0)
-  {
-    return(NA_real_)
-  }
-  g <- tapply(y, x, function(z) c(n = length(z), m = mean(z)))
-  n <- vapply(g, function(u) u[["n"]], numeric(1))
-  m <- vapply(g, function(u) u[["m"]], numeric(1))
-  ss_b <- sum(n * (m - grand)^2)
-  as.numeric(ss_b / ss_t)
+eta2 <- function(y, x) {
+    ok <- stats::complete.cases(y, x)
+    y <- y[ok]
+    x <- x[ok]
+    if (!length(y)) {
+        return(NA_real_)
+    }
+    grand <- mean(y)
+    ss_t <- sum((y - grand)^2)
+    if (ss_t == 0) {
+        return(NA_real_)
+    }
+    g <- tapply(y, x, function(z) c(n = length(z), m = mean(z)))
+    n <- vapply(g, function(u) u[["n"]], numeric(1))
+    m <- vapply(g, function(u) u[["m"]], numeric(1))
+    ss_b <- sum(n * (m - grand)^2)
+    as.numeric(ss_b / ss_t)
 }
 
 numeric_usable <- numeric_columns
 categorical_usable <- categorical_columns[
-  vapply(
-    monthly_rankings[categorical_columns],
-    function(v) n_distinct(v, na.rm = FALSE) <= 60L,
-    logical(1)
-  )
+    vapply(
+        monthly_rankings[categorical_columns],
+        function(v) n_distinct(v, na.rm = FALSE) <= 60L,
+        logical(1)
+    )
 ]
 
-if(length(numeric_usable) >= 1 && length(categorical_usable) >= 1)
-{
-  eta_grid <- purrr::map_dfr(categorical_usable, function(cc)
-    {
-      # Use an explicit function so 'cc' is captured properly
-      vals <- purrr::map_dbl(numeric_usable, function(nc)
-      {
-        eta2(monthly_rankings[[nc]], monthly_rankings[[cc]])
-      })
-      tibble::tibble(
-        categorical = cc,
-        !!! rlang::set_names(as.list(vals), numeric_usable)  # splice named columns
-      )
+if (length(numeric_usable) >= 1 && length(categorical_usable) >= 1) {
+    eta_grid <- purrr::map_dfr(categorical_usable, function(cc) {
+        # Use an explicit function so 'cc' is captured properly
+        vals <- purrr::map_dbl(numeric_usable, function(nc) {
+            eta2(monthly_rankings[[nc]], monthly_rankings[[cc]])
+        })
+        tibble::tibble(
+            categorical = cc,
+            !!!rlang::set_names(as.list(vals), numeric_usable) # splice named columns
+        )
     })
 
-  readr::write_csv(eta_grid, file.path(outdir, "eta2_categorical_numeric.csv"))
+    readr::write_csv(eta_grid, file.path(outdir, "eta2_categorical_numeric.csv"))
 
-  eta_long <- eta_grid %>%
-    pivot_longer(-categorical, names_to = "numeric", values_to = "eta2") %>%
-    arrange(desc(eta2)) %>%
-    filter(!is.na(eta2))
+    eta_long <- eta_grid %>%
+        pivot_longer(-categorical, names_to = "numeric", values_to = "eta2") %>%
+        arrange(desc(eta2)) %>%
+        filter(!is.na(eta2))
 
-  top_pairs <- eta_long %>%
-    slice_head(n = 20)
+    top_pairs <- eta_long %>%
+        slice_head(n = 20)
 
-  readr::write_csv(top_pairs, file.path(outdir, "eta2_top_pairs.csv"))
+    readr::write_csv(top_pairs, file.path(outdir, "eta2_top_pairs.csv"))
 
-  top_pairs %>%
-    mutate(eta2 = round(eta2, 3)) %>%
-    knitr::kable(caption = "Top 20 categorical -> numerical associations (η²)")
+    top_pairs %>%
+        mutate(eta2 = round(eta2, 3)) %>%
+        knitr::kable(caption = "Top 20 categorical -> numerical associations (η²)")
 }
 ```
 
-
 #Sliding Window
 ```{r}
+#| label: setup-sliding-window
+# 1. Setup parameters
+window_size <- 10
+forecast_horizon <- 1
 
+# Prepare data: Aggregate to yearly average returns
+yearly_data <- monthly_rankings %>%
+    mutate(year = lubridate::year(Date)) %>%
+    filter(!is.na(year)) %>%
+    group_by(year) %>%
+    summarise(avg_return = mean(pct_change, na.rm = TRUE), .groups = "drop") %>%
+    arrange(year)
+
+# Split into Train (80%) and Test (20%) based on the cutoff defined earlier
+# We use the 'train_cutoff_date' year to define the split
+train_cutoff_year <- lubridate::year(train_cutoff_date)
+
+yearly_train <- yearly_data %>% filter(year <= train_cutoff_year)
+yearly_test <- yearly_data %>% filter(year > train_cutoff_year)
+
+cat("Yearly Data Summary:\n")
+cat("Training Years:", min(yearly_train$year), "-", max(yearly_train$year), "\n")
+cat("Testing Years:", min(yearly_test$year), "-", max(yearly_test$year), "\n")
 ```
 
+```{r}
+#| label: setup-sliding-window-loop
+# 2a. Setup Sliding Window Parameters
 
+years_train <- yearly_train$year
+min_year <- min(years_train)
+max_year <- max(years_train)
+loop_starts <- numeric(0)
+
+# Check if we have enough data
+if ((max_year - min_year + 1) >= (window_size + forecast_horizon)) {
+    # Define start years for the windows
+    loop_starts <- seq(min_year, max_year - window_size - forecast_horizon + 1)
+}
+
+cat("Sliding Window Setup:\n")
+cat("Total Windows to Process:", length(loop_starts), "\n")
+```
+
+```{r}
+#| label: define-window-function
+# 2b. Define Helper Function for Single Window Processing
+
+process_single_window <- function(start_y, data, w_size, f_horizon) {
+    # Define Window Interval
+    train_window_years <- start_y:(start_y + w_size - 1)
+    test_window_years <- (start_y + w_size):(start_y + w_size + f_horizon - 1)
+
+    # Subset Data
+    train_subset <- data %>% filter(year %in% train_window_years)
+    test_subset <- data %>% filter(year %in% test_window_years)
+
+    if (nrow(train_subset) > 0 && nrow(test_subset) > 0) {
+        # Train model using ARIMA
+        # Convert to time series (frequency=1 for yearly data)
+        ts_train <- ts(train_subset$avg_return, start = min(train_subset$year), frequency = 1)
+        model <- auto.arima(ts_train)
+
+        # Predict
+        forecast_obj <- forecast(model, h = nrow(test_subset))
+        predictions <- as.numeric(forecast_obj$mean)
+
+        # Return result tibble
+        return(test_subset %>%
+            mutate(
+                predicted = predictions,
+                window_start = start_y,
+                window_end = max(train_window_years),
+                error = avg_return - predicted,
+                type = "Validation"
+            ))
+    } else {
+        return(NULL)
+    }
+}
+```
+
+```{r}
+#| label: execute-sliding-window
+# 2c. Execute Sliding Window Loop
+
+validation_results <- tibble()
+
+if (length(loop_starts) > 0) {
+    # Use lapply to process all windows
+    results_list <- lapply(loop_starts, function(start_y) {
+        process_single_window(start_y, yearly_train, window_size, forecast_horizon)
+    })
+
+    # Filter out NULLs and bind rows
+    results_list <- results_list[!sapply(results_list, is.null)]
+
+    if (length(results_list) > 0) {
+        validation_results <- bind_rows(results_list)
+        cat("Sliding window validation complete. Generated", nrow(validation_results), "points.\n")
+    }
+}
+```
+
+```{r}
+#| label: final-evaluation
+# 4.) Keep doing this until we reach the testing set...
+# 5.) Do error metrics one final time
+
+# Now we train on the ENTIRE training set (the "most accurate" model so far)
+ts_full_train <- ts(yearly_train$avg_return, start = min(yearly_train$year), frequency = 1)
+final_train_model <- auto.arima(ts_full_train)
+
+# Predict on the held-out testing set
+final_forecast <- forecast(final_train_model, h = nrow(yearly_test))
+final_predictions <- as.numeric(final_forecast$mean)
+
+final_test_results <- yearly_test %>%
+    mutate(
+        predicted = final_predictions,
+        error = avg_return - predicted,
+        type = "Final Test"
+    )
+
+cat("=== Final Evaluation on Testing Set ===\n")
+# Calculate metrics for the final test
+final_metrics <- final_test_results %>%
+    summarise(
+        RMSE = sqrt(mean(error^2)),
+        MAE = mean(abs(error)),
+        MAPE = mean(abs(error / avg_return)) * 100
+    )
+print(final_metrics)
+```
+
+```{r}
+#| label: visualize-all
+# Combine validation results and final test results for visualization
+all_results <- bind_rows(validation_results, final_test_results)
+
+if (nrow(all_results) > 0) {
+    # Calculate overall metrics for the sliding window validation phase
+    val_metrics <- validation_results %>%
+        summarise(
+            RMSE = sqrt(mean(error^2)),
+            MAE = mean(abs(error)),
+            MAPE = mean(abs(error / avg_return)) * 100
+        )
+
+    cat("\n=== Sliding Window Validation Metrics (Average across folds) ===\n")
+    print(val_metrics)
+
+    # Plotting
+    ggplot() +
+        # Actual Data (History)
+        geom_line(data = yearly_data, aes(x = year, y = avg_return, color = "Actual Data"), size = 1) +
+
+        # Validation Predictions (Sliding Window)
+        geom_point(data = validation_results, aes(x = year, y = predicted, color = "Validation Preds"), alpha = 0.6) +
+
+        # Final Test Predictions
+        geom_line(data = final_test_results, aes(x = year, y = predicted, color = "Final Test Preds"), linetype = "dashed", size = 1) +
+        labs(
+            title = "Sliding Window Validation & Final Testing",
+            subtitle = "Validation points generated via rolling windows; Final Test trained on full training set",
+            y = "Average Return", x = "Year",
+            color = "Legend"
+        ) +
+        theme_minimal()
+}
+```
+
+```{r}
+#| label: future-prediction
+# 6.) Then predict the final trends of the market...
+
+# Train on ALL available data (Train + Test) for the best possible future forecast
+# Convert to time series for ARIMA
+ts_data <- ts(yearly_data$avg_return, start = min(yearly_data$year), frequency = 1)
+full_model <- auto.arima(ts_data)
+
+# Forecast next 10 years
+forecast_obj <- forecast(full_model, h = 10)
+
+last_year <- max(yearly_data$year)
+future_years <- tibble(year = (last_year + 1):(last_year + 10))
+
+future_projection <- future_years %>%
+    mutate(predicted_return = as.numeric(forecast_obj$mean), type = "Future Forecast")
+
+# Visualization
+bind_rows(
+    yearly_data %>% mutate(type = "History") %>% rename(predicted_return = avg_return),
+    future_projection
+) %>%
+    ggplot(aes(x = year, y = predicted_return, color = type, linetype = type)) +
+    geom_line(size = 1) +
+    geom_point() +
+    labs(
+        title = "Future Market Trend Projection (Next 10 Years)",
+        subtitle = "Based on ARIMA forecast of all available historical data",
+        y = "Average Return / Predicted", x = "Year"
+    ) +
+    theme_minimal()
+```
+
+```{r}
+#| label: forecast-index-effect
+
+# 1. Prepare yearly index effect data
+yearly_index_effect <- milestone_events %>%
+    group_by(year) %>%
+    summarise(
+        avg_effect = mean(pct_change, na.rm = TRUE),
+        event_count = n(),
+        .groups = "drop"
+    ) %>%
+    arrange(year)
+
+# 2. Forecast
+if (nrow(yearly_index_effect) > 2) {
+    # Convert to time series for ARIMA
+    ts_effect <- ts(yearly_index_effect$avg_effect, start = min(yearly_index_effect$year), frequency = 1)
+    effect_model <- auto.arima(ts_effect)
+
+    # Forecast next 10 years
+    forecast_obj <- forecast(effect_model, h = 10)
+
+    future_years_effect <- tibble(year = (max(yearly_index_effect$year) + 1):(max(yearly_index_effect$year) + 10))
+
+    future_effect_projection <- future_years_effect %>%
+        mutate(predicted_effect = as.numeric(forecast_obj$mean), type = "Forecast")
+
+    history_effect_plot <- yearly_index_effect %>%
+        mutate(type = "History") %>%
+        rename(predicted_effect = avg_effect)
+
+    # 3. Visualize
+    print(bind_rows(history_effect_plot, future_effect_projection) %>%
+        ggplot(aes(x = year, y = predicted_effect, color = type, linetype = type)) +
+        geom_line(size = 1) +
+        geom_point() +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
+        labs(
+            title = "Forecast of the 'Index Effect' (Milestone Entry Return)",
+            subtitle = "Based on ARIMA forecast",
+            y = "Average Monthly Return on Entry", x = "Year"
+        ) +
+        theme_minimal())
+
+    cat("\n=== Index Effect ARIMA Model ===\n")
+    print(effect_model)
+}
+```
